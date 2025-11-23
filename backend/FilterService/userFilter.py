@@ -1,9 +1,18 @@
+import re
+from pathlib import Path
+
 from .filter import FilterService
 
 
 class UserFilter(FilterService):
-    def __init__(self):
-        patterns = [
+    """
+    Filter sensitive words for Chilean scams.
+    Combines built-in patterns with patterns from a keywords file.
+    """
+
+    def __init__(self, keywords_file: str = "user_filtered_words.txt"):
+        # Built-in patterns (old ones)
+        built_in_patterns = [
             # Credenciales
             r"\b(clave|password|contraseñ?a|passwd|pwd)\b",
             r"\btoken\b",
@@ -43,4 +52,30 @@ class UserFilter(FilterService):
             # Fotos de documentos
             r"\bfoto\s+de\s+mi\s+(carnet|ci|cedula|identidad|tarjeta)\b",
         ]
-        super().__init__(patterns)
+
+        # Load additional patterns from file
+        file_patterns = self._load_patterns(keywords_file)
+
+        # Combine built-in and file patterns
+        all_patterns = built_in_patterns + file_patterns
+        super().__init__(all_patterns)
+
+    def _load_patterns(self, file_path: str) -> list[str]:
+        path = Path(file_path)
+        if not path.exists():
+            return []
+
+        patterns = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            patterns.append(line)
+        return patterns
+
+
+def filter_sensitive_words(text: str, filter_instance: UserFilter) -> str:
+    """Replace sensitive words in text with 'zzzz'."""
+    for pattern in filter_instance.patterns:
+        text = re.sub(pattern, "zzzz", text, flags=re.IGNORECASE)
+    return text
