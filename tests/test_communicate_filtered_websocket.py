@@ -1,6 +1,6 @@
 import json
 from base64 import b64decode
-from typing import AsyncIterable, AsyncIterator, List
+from typing import AsyncIterable, AsyncIterator, Iterable, List
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -183,3 +183,50 @@ def test_communication_filtered_flushes_after_init_recording(monkeypatch) -> Non
                 assert b64decode(anonymized_event["audio_b64"]) == b"ANON" + audio_chunk
 
     assert flag_service.calls == [b"\x05\x06" * 6]
+
+
+def test_communication_filtered_handles_generator_payload(monkeypatch) -> None:
+    flag_service = FakeAudioFlagService()
+
+    class GeneratorAnonymizer(FakeAudioAnonymizerService):
+        async def anonymize_stream(self, audio_chunks: AsyncIterable[bytes]) -> Iterable[bytes]:
+            collected = []
+            async for chunk in audio_chunks:
+                collected.append(bytes(chunk))
+            self.calls.append(collected)
+            return (part for part in ([b"ANON"] + collected))
+
+    anonymizer_service = GeneratorAnonymizer()
+
+    async def immediate_sleep(delay: float) -> None:  # type: ignore[override]
+        return None
+
+    monkeypatch.setattr(
+        "backend.api.communicate_websocket.asyncio.sleep", immediate_sleep
+    )
+
+    app = FastAPI()
+    app.include_router(create_communicate_filtered_router(flag_service, anonymizer_service))
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/communication-filtered/demo?role=user") as ws_user:
+            ready_user = ws_user.receive_json()
+            client_user = ready_user["client_id"]
+
+            with client.websocket_connect(
+                "/ws/communication-filtered/demo?role=scammer"
+            ) as ws_scammer:
+                ws_scammer.receive_json()
+                ws_scammer.receive_json()
+                ws_user.receive_json()
+
+                speech = b"\x09\x0a" * 3
+                ws_user.send_bytes(speech)
+                ws_user.send_text(json.dumps({"init_recording": True}))
+
+                anonymized_event = ws_scammer.receive_json()
+                assert anonymized_event["event"] == "audio_anonymized"
+                assert anonymized_event["client_id"] == client_user
+                assert b64decode(anonymized_event["audio_b64"]) == b"ANON" + speech
+
+    assert flag_service.calls == [b"\x09\x0a" * 3]

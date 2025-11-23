@@ -7,7 +7,7 @@ import logging
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from starlette.websockets import WebSocketState
@@ -73,6 +73,37 @@ DEFAULT_SILENCE_MP3 = base64.b64decode(
         "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU="
     )
 )
+
+
+async def _collect_audio_bytes(payload: object) -> bytes:
+    if isinstance(payload, (bytes, bytearray, memoryview)):
+        return bytes(payload)
+    if isinstance(payload, str):
+        return payload.encode("utf-8")
+
+    if hasattr(payload, "__aiter__"):
+        data = bytearray()
+        async for chunk in payload:  # type: ignore[attr-defined]
+            if isinstance(chunk, (bytes, bytearray, memoryview)):
+                data.extend(chunk)
+            elif chunk is None:
+                continue
+            else:
+                data.extend(bytes(chunk))
+        return bytes(data)
+
+    if isinstance(payload, Iterable):
+        data = bytearray()
+        for chunk in payload:
+            if isinstance(chunk, (bytes, bytearray, memoryview)):
+                data.extend(chunk)
+            elif chunk is None:
+                continue
+            else:
+                data.extend(bytes(chunk))
+        return bytes(data)
+
+    raise TypeError("Expected bytes-like payload for anonymized audio")
 
 
 @dataclass
@@ -646,7 +677,7 @@ def create_communicate_filtered_router(
                     yield chunk
 
             try:
-                anonymized_audio = await anonymizer_service.anonymize_stream(
+                raw_audio = await anonymizer_service.anonymize_stream(
                     _snapshot_stream()
                 )
             except asyncio.CancelledError:
@@ -654,6 +685,15 @@ def create_communicate_filtered_router(
             except Exception:
                 LOGGER.exception(
                     "Failed to anonymize audio stream for client %s",
+                    client.client_id,
+                )
+                return
+
+            try:
+                anonymized_audio = await _collect_audio_bytes(raw_audio)
+            except TypeError:
+                LOGGER.exception(
+                    "Unsupported anonymized audio payload for client %s",
                     client.client_id,
                 )
                 return
