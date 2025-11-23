@@ -5,10 +5,12 @@ import base64
 import json
 import logging
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from backend.services import AudioFlagService, FlaggedTranscript
 
@@ -29,9 +31,21 @@ class Room:
         self._clients: Dict[int, Client] = {}
         self._lock = asyncio.Lock()
 
+    def _prune_disconnected_locked(self) -> None:
+        stale_keys = [
+            key
+            for key, client in list(self._clients.items())
+            if not _is_websocket_connected(client.websocket)
+        ]
+        for key in stale_keys:
+            stale = self._clients.pop(key, None)
+            if stale:
+                LOGGER.debug("Pruned disconnected websocket %s", stale.client_id)
+
     async def join(self, ws: WebSocket, role: str) -> Client:
         client = Client(client_id=uuid.uuid4().hex, role=role, websocket=ws)
         async with self._lock:
+            self._prune_disconnected_locked()
             self._clients[id(ws)] = client
         return client
 
@@ -41,14 +55,21 @@ class Room:
 
     async def peers(self, ws: WebSocket) -> List[Client]:
         async with self._lock:
-            return [client for key, client in self._clients.items() if key != id(ws)]
+            self._prune_disconnected_locked()
+            return [
+                client
+                for key, client in self._clients.items()
+                if key != id(ws) and _is_websocket_connected(client.websocket)
+            ]
 
     async def clients(self) -> List[Client]:
         async with self._lock:
+            self._prune_disconnected_locked()
             return list(self._clients.values())
 
     async def is_empty(self) -> bool:
         async with self._lock:
+            self._prune_disconnected_locked()
             return not self._clients
 
 
@@ -73,15 +94,59 @@ async def _cleanup_room(room_id: str, room: Room) -> None:
             _rooms.pop(room_id, None)
 
 
+def _is_websocket_connected(ws: WebSocket) -> bool:
+    return (
+        getattr(ws, "application_state", WebSocketState.DISCONNECTED)
+        == WebSocketState.CONNECTED
+        and getattr(ws, "client_state", WebSocketState.DISCONNECTED)
+        == WebSocketState.CONNECTED
+    )
+
+
+async def _safe_disconnect_peer(room: Room, peer: Client, *, notify: bool) -> None:
+    departed = await room.leave(peer.websocket)
+    if departed and notify:
+        message = {
+            "event": "peer_left",
+            "client_id": departed.client_id,
+            "role": departed.role,
+        }
+        with suppress(Exception):
+            await _notify_peers(room, message, exclude=peer.websocket)
+
+    with suppress(Exception):
+        await peer.websocket.close()
+
+
+async def _handle_broadcast_failures(
+    room: Room,
+    peers: List[Client],
+    results: List[object],
+    log_template: str,
+    *,
+    notify_on_disconnect: bool,
+) -> None:
+    for peer, result in zip(peers, results):
+        if isinstance(result, Exception):
+            LOGGER.warning(log_template, peer.client_id, result)
+            await _safe_disconnect_peer(
+                room, peer, notify=notify_on_disconnect
+            )
+
+
 async def _broadcast_text(room: Room, sender: WebSocket, payload: str) -> None:
     peers = await room.peers(sender)
     if not peers:
         return
     tasks = [peer.websocket.send_text(payload) for peer in peers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for peer, result in zip(peers, results):
-        if isinstance(result, Exception):
-            LOGGER.warning("Broadcast to peer %s failed: %s", peer.client_id, result)
+    await _handle_broadcast_failures(
+        room,
+        peers,
+        results,
+        "Broadcast to peer %s failed: %s",
+        notify_on_disconnect=True,
+    )
 
 
 async def _notify_peers(
@@ -102,11 +167,13 @@ async def _notify_peers(
         return
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for client, result in zip(recipients, results):
-        if isinstance(result, Exception):
-            LOGGER.warning(
-                "Notification to peer %s failed: %s", client.client_id, result
-            )
+    await _handle_broadcast_failures(
+        room,
+        recipients,
+        results,
+        "Notification to peer %s failed: %s",
+        notify_on_disconnect=False,
+    )
 
 
 async def _broadcast_flagged_audio(
@@ -135,13 +202,13 @@ async def _broadcast_flagged_audio(
 
     tasks = [peer.websocket.send_json(message) for peer in peers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for peer, result in zip(peers, results):
-        if isinstance(result, Exception):
-            LOGGER.warning(
-                "Flagged audio broadcast to %s failed: %s",
-                peer.client_id,
-                result,
-            )
+    await _handle_broadcast_failures(
+        room,
+        peers,
+        results,
+        "Flagged audio broadcast to %s failed: %s",
+        notify_on_disconnect=True,
+    )
 
 
 async def _broadcast_raw_audio(room: Room, sender: Client, audio_payload: bytes) -> None:
@@ -162,13 +229,13 @@ async def _broadcast_raw_audio(room: Room, sender: Client, audio_payload: bytes)
 
     tasks = [peer.websocket.send_json(message) for peer in peers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for peer, result in zip(peers, results):
-        if isinstance(result, Exception):
-            LOGGER.warning(
-                "Raw audio broadcast to %s failed: %s",
-                peer.client_id,
-                result,
-            )
+    await _handle_broadcast_failures(
+        room,
+        peers,
+        results,
+        "Raw audio broadcast to %s failed: %s",
+        notify_on_disconnect=True,
+    )
 
 
 def create_communicate_router(audio_service: AudioFlagService) -> APIRouter:
