@@ -26,7 +26,7 @@ class FakeAudioFlagService:
             )
 
 
-def test_communicate_websocket_relays_flagged_audio_between_peers() -> None:
+def test_communicate_websocket_relays_flagged_and_raw_audio_between_peers() -> None:
     service = FakeAudioFlagService()
     app = FastAPI()
     app.include_router(create_communicate_router(service))
@@ -61,6 +61,12 @@ def test_communicate_websocket_relays_flagged_audio_between_peers() -> None:
 
                 audio_chunk_a = b"\x01\x02" * 10
                 ws_a.send_bytes(audio_chunk_a)
+                raw_event_b = ws_b.receive_json()
+                assert raw_event_b["event"] == "audio_raw"
+                assert raw_event_b["client_id"] == client_a
+                assert raw_event_b["role"] == "user"
+                assert b64decode(raw_event_b["audio_b64"]) == audio_chunk_a
+
                 audio_event_b = ws_b.receive_json()
                 assert audio_event_b["event"] == "audio"
                 assert audio_event_b["client_id"] == client_a
@@ -71,6 +77,12 @@ def test_communicate_websocket_relays_flagged_audio_between_peers() -> None:
 
                 audio_chunk_b = b"\x03\x04" * 12
                 ws_b.send_bytes(audio_chunk_b)
+                raw_event_a = ws_a.receive_json()
+                assert raw_event_a["event"] == "audio_raw"
+                assert raw_event_a["client_id"] == client_b
+                assert raw_event_a["role"] == "scammer"
+                assert b64decode(raw_event_a["audio_b64"]) == audio_chunk_b
+
                 audio_event_a = ws_a.receive_json()
                 assert audio_event_a["event"] == "audio"
                 assert audio_event_a["client_id"] == client_b
@@ -92,4 +104,3 @@ def test_communicate_websocket_relays_flagged_audio_between_peers() -> None:
         ("user", b"\x01\x02" * 10),
         ("scammer", b"\x03\x04" * 12),
     ]
-

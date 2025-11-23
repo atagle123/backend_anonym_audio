@@ -144,6 +144,33 @@ async def _broadcast_flagged_audio(
             )
 
 
+async def _broadcast_raw_audio(room: Room, sender: Client, audio_payload: bytes) -> None:
+    if not audio_payload:
+        return
+
+    peers = await room.peers(sender.websocket)
+    if not peers:
+        return
+
+    audio_b64 = base64.b64encode(audio_payload).decode("ascii")
+    message = {
+        "event": "audio_raw",
+        "client_id": sender.client_id,
+        "role": sender.role,
+        "audio_b64": audio_b64,
+    }
+
+    tasks = [peer.websocket.send_json(message) for peer in peers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for peer, result in zip(peers, results):
+        if isinstance(result, Exception):
+            LOGGER.warning(
+                "Raw audio broadcast to %s failed: %s",
+                peer.client_id,
+                result,
+            )
+
+
 def create_communicate_router(audio_service: AudioFlagService) -> APIRouter:
     """
     Register a websocket endpoint that relays binary audio frames between peers
@@ -157,6 +184,7 @@ def create_communicate_router(audio_service: AudioFlagService) -> APIRouter:
           Once the transcript is flagged, the audio chunk plus metadata is sent
           to the other peers.
         - Text frames are forwarded as-is for out-of-band coordination.
+        - Raw audio chunks are broadcast immediately for low-latency playback.
         - Lifecycle events are emitted to all peers (`peer_joined`, `peer_left`).
     """
 
@@ -245,6 +273,7 @@ def create_communicate_router(audio_service: AudioFlagService) -> APIRouter:
                 binary = message.get("bytes")
                 if binary is not None:
                     pending_audio.extend(binary)
+                    await _broadcast_raw_audio(room, client, binary)
                     await audio_queue.put(binary)
                     continue
 
