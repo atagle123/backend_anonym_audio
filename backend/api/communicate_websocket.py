@@ -592,6 +592,8 @@ def create_communicate_filtered_router(
         stream_closed = False
         audio_queue: Optional[asyncio.Queue[Optional[bytes]]] = None
         flag_task: Optional[asyncio.Task[None]] = None
+        flush_lock = asyncio.Lock()
+        delayed_flush_task: Optional[asyncio.Task[None]] = None
 
         if role_key == "user":
             audio_queue = asyncio.Queue()
@@ -608,7 +610,8 @@ def create_communicate_filtered_router(
                     async for flagged in audio_service.process_stream(
                         audio_chunk_stream(), role=client.role
                     ):
-                        flagged_results.append(flagged)
+                        async with flush_lock:
+                            flagged_results.append(flagged)
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -618,6 +621,69 @@ def create_communicate_filtered_router(
                     )
 
             flag_task = asyncio.create_task(flag_worker())
+
+        async def _pop_recording_snapshot() -> tuple[List[bytes], List[FlaggedTranscript]]:
+            nonlocal recorded_chunks, flagged_results
+            async with flush_lock:
+                if not recorded_chunks:
+                    return [], []
+                chunks = list(recorded_chunks)
+                recorded_chunks.clear()
+                transcripts = list(flagged_results)
+                flagged_results.clear()
+            return chunks, transcripts
+
+        async def _flush_anonymized_snapshot() -> None:
+            if role_key != "user":
+                return
+
+            chunks, transcripts = await _pop_recording_snapshot()
+            if not chunks:
+                return
+
+            async def _snapshot_stream():
+                for chunk in chunks:
+                    yield chunk
+
+            try:
+                anonymized_audio = await anonymizer_service.anonymize_stream(
+                    _snapshot_stream()
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "Failed to anonymize audio stream for client %s",
+                    client.client_id,
+                )
+                return
+
+            transcript_text = ""
+            flagged_overall = False
+            if transcripts:
+                transcript_text, flagged_overall = _aggregate_flagged_results(
+                    transcripts
+                )
+
+            await _broadcast_anonymized_audio(
+                room,
+                client,
+                anonymized_audio,
+                transcript=transcript_text,
+                flagged=flagged_overall,
+            )
+
+        async def _schedule_delayed_flush() -> None:
+            try:
+                await asyncio.sleep(3)
+                await _flush_anonymized_snapshot()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "Delayed anonymized broadcast failed for client %s",
+                    client.client_id,
+                )
 
         try:
             while True:
@@ -642,12 +708,28 @@ def create_communicate_filtered_router(
                             payload = json.loads(text)
                         except json.JSONDecodeError:
                             payload = None
-                        if isinstance(payload, dict) and payload.get("event") == "end":
-                            stream_closed = True
-                            if audio_queue is not None:
-                                await audio_queue.put(None)
-                            handled = True
-                            break
+                        if isinstance(payload, dict):
+                            if payload.get("event") == "end":
+                                stream_closed = True
+                                if audio_queue is not None:
+                                    await audio_queue.put(None)
+                                handled = True
+                                break
+                            init_recording = payload.get("init_recording")
+                            if (
+                                role_key == "user"
+                                and isinstance(init_recording, bool)
+                                and init_recording
+                            ):
+                                if (
+                                    delayed_flush_task is not None
+                                    and not delayed_flush_task.done()
+                                ):
+                                    delayed_flush_task.cancel()
+                                delayed_flush_task = asyncio.create_task(
+                                    _schedule_delayed_flush()
+                                )
+                                handled = True
                     if not handled:
                         await _broadcast_text(room, ws, text)
                     continue
@@ -663,41 +745,13 @@ def create_communicate_filtered_router(
                 except asyncio.CancelledError:
                     pass
 
-            anonymized_audio: Optional[bytes] = None
-            transcript = ""
-            flagged_overall = False
+            if delayed_flush_task is not None:
+                delayed_flush_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await delayed_flush_task
+                delayed_flush_task = None
 
-            if role_key == "user" and recorded_chunks:
-
-                async def _recorded_chunk_stream():
-                    for chunk in recorded_chunks:
-                        yield chunk
-
-                try:
-                    anonymized_audio = await anonymizer_service.anonymize_stream(
-                        _recorded_chunk_stream()
-                    )
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    LOGGER.exception(
-                        "Failed to anonymize audio stream for client %s",
-                        client.client_id,
-                    )
-
-                if flagged_results:
-                    transcript, flagged_overall = _aggregate_flagged_results(
-                        flagged_results
-                    )
-
-            if anonymized_audio:
-                await _broadcast_anonymized_audio(
-                    room,
-                    client,
-                    anonymized_audio,
-                    transcript=transcript,
-                    flagged=flagged_overall,
-                )
+            await _flush_anonymized_snapshot()
 
             departed = await room.leave(ws)
             departed_client = departed or client

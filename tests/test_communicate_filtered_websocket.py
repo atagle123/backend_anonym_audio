@@ -143,3 +143,43 @@ def test_communication_filtered_censors_flagged_audio() -> None:
                 assert b64decode(anonymized_event["audio_b64"]) == DEFAULT_SILENCE_MP3
 
     assert flag_service.calls == [b"\x0a\x0b" * 4]
+
+
+def test_communication_filtered_flushes_after_init_recording(monkeypatch) -> None:
+    flag_service = FakeAudioFlagService()
+    anonymizer_service = FakeAudioAnonymizerService()
+
+    async def immediate_sleep(delay: float) -> None:  # type: ignore[override]
+        return None
+
+    monkeypatch.setattr(
+        "backend.api.communicate_websocket.asyncio.sleep", immediate_sleep
+    )
+
+    app = FastAPI()
+    app.include_router(create_communicate_filtered_router(flag_service, anonymizer_service))
+
+    with TestClient(app) as client:
+        with client.websocket_connect("/ws/communication-filtered/demo?role=user") as ws_user:
+            ready_user = ws_user.receive_json()
+            client_user = ready_user["client_id"]
+
+            with client.websocket_connect(
+                "/ws/communication-filtered/demo?role=scammer"
+            ) as ws_scammer:
+                ws_scammer.receive_json()  # ready
+                ws_scammer.receive_json()  # peers
+                ws_user.receive_json()  # peer_joined
+
+                audio_chunk = b"\x05\x06" * 6
+                ws_user.send_bytes(audio_chunk)
+                ws_user.send_text(json.dumps({"init_recording": True}))
+
+                anonymized_event = ws_scammer.receive_json()
+                assert anonymized_event["event"] == "audio_anonymized"
+                assert anonymized_event["client_id"] == client_user
+                assert anonymized_event["flagged"] is False
+                assert anonymized_event["audio_format"] == "mp3"
+                assert b64decode(anonymized_event["audio_b64"]) == b"ANON" + audio_chunk
+
+    assert flag_service.calls == [b"\x05\x06" * 6]
