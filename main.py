@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 
 from backend.FilterService.chileFIlter import ChileScamFilter
 from backend.api.audio_flag_websocket import create_audio_flag_router
+from backend.api.communicate_websocket import create_communicate_router
 from backend.Notifier.service import TwilioClient
 from backend.services import (
     AudioFlagService,
@@ -75,6 +76,7 @@ def create_app() -> FastAPI:
     audio_flag_service = _build_audio_flag_service()
     notifier = _build_notifier()
     app.include_router(create_audio_flag_router(audio_flag_service, notifier))
+    app.include_router(create_communicate_router())
     return app
 
 
