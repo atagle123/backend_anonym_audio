@@ -1,0 +1,142 @@
+# -----------------------------
+# General OS / Editor artefacts
+# -----------------------------
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# -----------------------------
+# Logs & debug output
+# -----------------------------
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------
+# Environment & secrets
+# -----------------------------
+.env
+.env.*
+!.env.example
+.envrc
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# -----------------------------
+# Python artefacts
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+__pydantic_cache__/
+
+# Packaging / build directories
+.Python
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Coverage / test output
+.coverage
+.coverage.*
+.cache
+coverage/
+htmlcov/
+.tox/
+.nox/
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Virtual environments
+env/
+venv/
+.venv/
+ENV/
+.envs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Jupyter
+.ipynb_checkpoints
+
+# -----------------------------
+# Node / Frontend artefacts
+# -----------------------------
+node_modules/
+.pnp/
+.pnp.js
+.parcel-cache/
+
+# Common frontend build dirs
+*-cache/
+.next/
+.nuxt/
+.svelte-kit/
+.vercel/
+public/build/
+
+# -----------------------------
+# Backend-specific ignores
+# -----------------------------
+backend/.venv/
+backend/env/
+backend/venv/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/.coverage.*
+backend/coverage/
+backend/htmlcov/
+backend/.env
+backend/.env.*
+
+# -----------------------------
+# Frontend-specific ignores
+# -----------------------------
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/coverage/
+frontend/.coverage
+frontend/.coverage.*
+frontend/.next/
+frontend/.nuxt/
+frontend/.svelte-kit/
+frontend/.parcel-cache/
+frontend/.vercel/
+frontend/.env
+frontend/.env.*
+frontend/.eslintcache
