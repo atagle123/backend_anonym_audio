@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 
 from dotenv import load_dotenv
@@ -19,6 +20,8 @@ from backend.services import (
 
 load_dotenv()
 
+LOGGER = logging.getLogger(__name__)
+
 
 def _build_audio_flag_service() -> AudioFlagService:
     api_key = os.getenv("ELEVENLABS_API_KEY")
@@ -26,6 +29,9 @@ def _build_audio_flag_service() -> AudioFlagService:
         raise RuntimeError(
             "ELEVENLABS_API_KEY is not set. Export it before starting the server."
         )
+
+    masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) >= 8 else "***"
+    LOGGER.info("Loaded ELEVENLABS_API_KEY (masked): %s", masked_key)
 
     speech_to_text = ElevenLabsSpeechToTextService(api_key=api_key)
     filter_service_user = ChileScamFilter()
