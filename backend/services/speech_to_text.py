@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import inspect
 import json
 import logging
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import AsyncIterable, AsyncIterator, Optional, Protocol
+from urllib.parse import urlencode
 
 import websockets
 from websockets.client import WebSocketClientProtocol
@@ -52,16 +54,17 @@ class ElevenLabsSpeechToTextService:
     brokers a WebSocket connection against the ElevenLabs streaming endpoint.
     """
 
-    _STREAM_URL = "wss://api.elevenlabs.io/v1/speech-to-text/stream"
+    _STREAM_BASE_URL = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 
     def __init__(
         self,
         api_key: str,
-        model_id: str = "scribe_v2",
+        model_id: str = "scribe_v2_realtime",
         language: str = "es",
         sample_rate: int = 16_000,
         format_: str = "pcm16",
         connection_timeout: int = 10,
+        commit_strategy: str = "vad",
     ) -> None:
         if not api_key:
             raise ValueError("ElevenLabs API key is required")
@@ -70,20 +73,19 @@ class ElevenLabsSpeechToTextService:
         self._model_id = model_id
         self._language = language
         self._sample_rate = sample_rate
-        self._format = format_
+        self._encoding = self._normalise_encoding(format_, sample_rate)
         self._connection_timeout = connection_timeout
+        self._commit_strategy = self._normalise_commit_strategy(commit_strategy)
 
     async def stream_transcribe(
         self, audio_chunks: AsyncIterable[bytes]
     ) -> AsyncIterator[TranscriptSegment]:
         """
-        Forward binary audio frames to ElevenLabs and re-yield their transcript payloads.
+        Forward audio frames to ElevenLabs and re-yield their transcript payloads.
 
-        The ElevenLabs real-time API currently speaks WebSocket with an initial JSON
-        configuration message followed by raw audio frames. Responses are emitted as
-        JSON text frames containing partial or final transcripts. The payload shape
-        is documented in their API reference; we only care about `text` and
-        optional `is_final` flags here.
+        The realtime endpoint expects JSON control frames with base64-encoded audio
+        chunks. Responses arrive as JSON text frames containing partial or committed
+        transcripts.
         """
         sender_task: Optional[asyncio.Task[None]] = None
         try:
@@ -99,40 +101,41 @@ class ElevenLabsSpeechToTextService:
                 raise RuntimeError("Unsupported websockets version: missing header kwarg")
             connect_kwargs[_CONNECT_HEADER_KWARG] = headers
 
+            stream_url = self._build_stream_url()
+
             async with websockets.connect(
-                self._STREAM_URL,
+                stream_url,
                 **connect_kwargs,
             ) as ws:
-                await self._send_config(ws)
                 sender_task = asyncio.create_task(
                     self._forward_audio(ws, audio_chunks), name="elevenlabs-audio-forward"
                 )
 
-                async for text_frame in ws:
-                    # ElevenLabs currently sends transcripts in text frames.
-                    if isinstance(text_frame, (bytes, bytearray)):
-                        LOGGER.debug(
-                            "Ignoring unexpected binary frame from ElevenLabs (%s bytes)",
-                            len(text_frame),
-                        )
-                        continue
-
-                    payload = self._decode_payload(text_frame)
+                async for frame in ws:
+                    payload = self._decode_payload(frame)
                     if payload is None:
                         continue
 
-                    event_type = payload.get("type")
-                    if event_type == "transcript":
-                        data = payload.get("data", {})
-                        text = data.get("text")
+                    message_type = payload.get("message_type")
+                    if message_type == "partial_transcript":
+                        text = self._extract_transcript(payload)
                         if text:
-                            yield TranscriptSegment(
-                                text=text, is_final=data.get("is_final", False)
-                            )
-                    elif event_type == "error":
-                        raise RuntimeError(payload.get("message", "ElevenLabs error"))
-                    elif event_type == "session_information":
-                        LOGGER.debug("Session info: %s", payload)
+                            yield TranscriptSegment(text=text, is_final=False)
+                    elif message_type in {
+                        "committed_transcript",
+                        "committed_transcript_with_timestamps",
+                    }:
+                        text = self._extract_transcript(payload)
+                        if text:
+                            yield TranscriptSegment(text=text, is_final=True)
+                    elif message_type in {"auth_error", "quota_exceeded"}:
+                        detail = payload.get("error") or payload.get("message")
+                        raise PermissionError(detail or message_type)
+                    elif message_type == "error":
+                        detail = payload.get("error") or payload.get("message")
+                        raise RuntimeError(detail or "ElevenLabs realtime error")
+                    elif message_type == "session_started":
+                        LOGGER.debug("ElevenLabs realtime session started")
                     else:
                         LOGGER.debug("Unhandled ElevenLabs frame: %s", payload)
         except Exception:
@@ -145,17 +148,33 @@ class ElevenLabsSpeechToTextService:
                 with suppress(asyncio.CancelledError):
                     await sender_task
 
-    async def _send_config(self, ws: WebSocketClientProtocol) -> None:
-        config_payload = {
-            "type": "session.update",
-            "data": {
-                "model": self._model_id,
-                "language": self._language,
-                "audio_format": self._format,
-                "sample_rate_hz": self._sample_rate,
-            },
+    def _build_stream_url(self) -> str:
+        params = {
+            "model_id": self._model_id,
+            "encoding": self._encoding,
+            "sample_rate": str(self._sample_rate),
+            "commit_strategy": self._commit_strategy,
         }
-        await ws.send(json.dumps(config_payload))
+        if self._language:
+            params["language_code"] = self._language
+        query = urlencode(params)
+        return f"{self._STREAM_BASE_URL}?{query}"
+
+    @staticmethod
+    def _normalise_encoding(format_: str, sample_rate: int) -> str:
+        normalized = (format_ or "").lower()
+        if normalized.startswith("pcm_"):
+            return normalized
+        if normalized in {"pcm16", "pcm"}:
+            return f"pcm_{sample_rate}"
+        raise ValueError(f"Unsupported audio encoding for ElevenLabs realtime: {format_}")
+
+    @staticmethod
+    def _normalise_commit_strategy(strategy: str) -> str:
+        value = (strategy or "vad").lower()
+        if value not in {"vad", "manual"}:
+            raise ValueError(f"Unsupported commit strategy for ElevenLabs realtime: {strategy}")
+        return value
 
     async def _forward_audio(
         self, ws: WebSocketClientProtocol, audio_chunks: AsyncIterable[bytes]
@@ -163,16 +182,58 @@ class ElevenLabsSpeechToTextService:
         async for chunk in audio_chunks:
             if not chunk:
                 continue
-            await ws.send(chunk)
+            await ws.send(
+                json.dumps(
+                    {
+                        "message_type": "input_audio_chunk",
+                        "audio_base_64": base64.b64encode(chunk).decode("ascii"),
+                        "commit": False,
+                        "sample_rate": self._sample_rate,
+                    }
+                )
+            )
 
-        # Signal the end of the audio stream. ElevenLabs expects an explicit event.
-        await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-        await ws.send(json.dumps({"type": "response.create"}))
+        # Flush any buffered audio before closing down.
+        await ws.send(
+            json.dumps(
+                {
+                    "message_type": "input_audio_chunk",
+                    "audio_base_64": "",
+                    "commit": True,
+                    "sample_rate": self._sample_rate,
+                }
+            )
+        )
 
     @staticmethod
-    def _decode_payload(raw_frame: str) -> Optional[dict]:
+    def _decode_payload(raw_frame: str | bytes | bytearray) -> Optional[dict]:
+        if isinstance(raw_frame, (bytes, bytearray)):
+            try:
+                raw_frame = raw_frame.decode("utf-8")
+            except UnicodeDecodeError:
+                LOGGER.debug("Failed to decode ElevenLabs binary frame (%s bytes)", len(raw_frame))
+                return None
         try:
             return json.loads(raw_frame)
         except json.JSONDecodeError:
             LOGGER.debug("Failed to decode ElevenLabs frame: %s", raw_frame[:200])
+        return None
+
+    @staticmethod
+    def _extract_transcript(payload: dict) -> Optional[str]:
+        """
+        ElevenLabs sends transcript text in slightly different shapes depending on the
+        event. Fallback through the common field names.
+        """
+        for key in ("transcript", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("transcript", "text"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
         return None
