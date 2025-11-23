@@ -14,6 +14,7 @@ class UserFilter(FilterService):
         # Built-in patterns (old ones)
         built_in_patterns = [
             # Credenciales
+            r"\bpl[aá]tano\b",
             r"\b(clave|password|contraseñ?a|passwd|pwd)\b",
             r"\btoken\b",
             r"\bc[oó]digo\s*(de)?\s*(verificaci[oó]n|seguridad)\b",
