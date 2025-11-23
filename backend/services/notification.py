@@ -32,10 +32,10 @@ class TwilioNotifier:
     async def notify_flagged(self, transcript: FlaggedTranscript) -> None:
         payload = self.message_template.format(text=transcript.text)
         tasks = [
-            asyncio.to_thread(
-                self.twilio.create_call, self.phone_target, self.twiml_url
-            ),
-            asyncio.to_thread(self.twilio.send_sms, self.phone_target, payload),
+            #  asyncio.to_thread(
+            #     self.twilio.create_call, self.phone_target, self.twiml_url
+            # ),
+            # asyncio.to_thread(self.twilio.send_sms, self.phone_target, payload),
         ]
         tasks.append(
             asyncio.to_thread(self.twilio.send_whatsapp, self.whatsapp_target, payload)
