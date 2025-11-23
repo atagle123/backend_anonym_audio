@@ -6,15 +6,15 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from backend.api.audio_anonymizer_http import create_audio_anonymizer_router
 from backend.api.audio_flag_websocket import create_audio_flag_router
 from backend.api.communicate_websocket import (
-    create_communicate_filtered_router,
     create_communicate_router,
 )
+from backend.audioAnonymizer.service import build_audio_anonymizer_service
 from backend.FilterService.chileFilter import ChileScamFilter
 from backend.FilterService.userFilter import UserFilter
 from backend.Notifier.service import TwilioClient
-from backend.audioAnonymizer.service import build_audio_anonymizer_service
 from backend.services import (
     AudioFlagService,
     ElevenLabsSpeechToTextService,
@@ -94,9 +94,10 @@ def create_app() -> FastAPI:
     notifier = _build_notifier()
     app.include_router(create_audio_flag_router(audio_flag_service, notifier))
     app.include_router(create_communicate_router(audio_flag_service))
-    app.include_router(
-        create_communicate_filtered_router(audio_flag_service, audio_anonymizer_service)
-    )
+    #  app.include_router(
+    #     create_communicate_filtered_router(audio_flag_service, audio_anonymizer_service)
+    # )
+    app.include_router(create_audio_anonymizer_router(audio_anonymizer_service))
     return app
 
 
