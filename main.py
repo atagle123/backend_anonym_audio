@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -23,6 +24,13 @@ from backend.services import (
 )
 
 load_dotenv()
+
+try:
+    import uvloop
+except ModuleNotFoundError:
+    uvloop = None  # type: ignore[assignment]
+else:
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 
 LOGGER = logging.getLogger(__name__)
 
