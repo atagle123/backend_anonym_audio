@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 from contextlib import suppress
@@ -11,6 +12,18 @@ import websockets
 from websockets.client import WebSocketClientProtocol
 
 LOGGER = logging.getLogger(__name__)
+
+_CONNECT_HEADER_KWARG: Optional[str] = None
+try:
+    _connect_params = inspect.signature(websockets.connect).parameters
+    for candidate in ("additional_headers", "extra_headers"):
+        if candidate in _connect_params:
+            _CONNECT_HEADER_KWARG = candidate
+            break
+except (ValueError, TypeError):
+    # If introspection fails we fall back to the legacy kwarg. A failure will
+    # surface later when we try to connect, which is fine.
+    _CONNECT_HEADER_KWARG = "extra_headers"
 
 
 @dataclass
@@ -74,14 +87,21 @@ class ElevenLabsSpeechToTextService:
         """
         sender_task: Optional[asyncio.Task[None]] = None
         try:
+            headers = {
+                "xi-api-key": self._api_key,
+                "accept": "application/json",
+            }
+            connect_kwargs = {
+                "open_timeout": self._connection_timeout,
+                "max_size": None,
+            }
+            if not _CONNECT_HEADER_KWARG:
+                raise RuntimeError("Unsupported websockets version: missing header kwarg")
+            connect_kwargs[_CONNECT_HEADER_KWARG] = headers
+
             async with websockets.connect(
                 self._STREAM_URL,
-                extra_headers={
-                    "xi-api-key": self._api_key,
-                    "accept": "application/json",
-                },
-                open_timeout=self._connection_timeout,
-                max_size=None,
+                **connect_kwargs,
             ) as ws:
                 await self._send_config(ws)
                 sender_task = asyncio.create_task(

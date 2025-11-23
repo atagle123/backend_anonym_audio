@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 
-from fastapi import FastAPI
 from dotenv import load_dotenv
+from fastapi import FastAPI
 
-from backend.FilterService.chileFIlter import ChileScamFilter
 from backend.api.audio_flag_websocket import create_audio_flag_router
 from backend.api.communicate_websocket import create_communicate_router
+from backend.FilterService.chileFilter import ChileScamFilter
+from backend.FilterService.userFilter import UserFilter
 from backend.Notifier.service import TwilioClient
 from backend.services import (
     AudioFlagService,
@@ -28,7 +29,7 @@ def _build_audio_flag_service() -> AudioFlagService:
 
     speech_to_text = ElevenLabsSpeechToTextService(api_key=api_key)
     filter_service_user = ChileScamFilter()
-    filter_service_scammer = ChileScamFilter()
+    filter_service_scammer = UserFilter()
     return AudioFlagService(
         speech_to_text,
         filter_service_user=filter_service_user,

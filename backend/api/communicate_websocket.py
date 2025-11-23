@@ -41,11 +41,7 @@ class Room:
 
     async def peers(self, ws: WebSocket) -> List[Client]:
         async with self._lock:
-            return [
-                client
-                for key, client in self._clients.items()
-                if key != id(ws)
-            ]
+            return [client for key, client in self._clients.items() if key != id(ws)]
 
     async def clients(self) -> List[Client]:
         async with self._lock:
@@ -77,9 +73,7 @@ async def _cleanup_room(room_id: str, room: Room) -> None:
             _rooms.pop(room_id, None)
 
 
-async def _broadcast_text(
-    room: Room, sender: WebSocket, payload: str
-) -> None:
+async def _broadcast_text(room: Room, sender: WebSocket, payload: str) -> None:
     peers = await room.peers(sender)
     if not peers:
         return
@@ -87,9 +81,7 @@ async def _broadcast_text(
     results = await asyncio.gather(*tasks, return_exceptions=True)
     for peer, result in zip(peers, results):
         if isinstance(result, Exception):
-            LOGGER.warning(
-                "Broadcast to peer %s failed: %s", peer.client_id, result
-            )
+            LOGGER.warning("Broadcast to peer %s failed: %s", peer.client_id, result)
 
 
 async def _notify_peers(
@@ -304,4 +296,3 @@ def create_communicate_router(audio_service: AudioFlagService) -> APIRouter:
             await _cleanup_room(room_id, room)
 
     return router
-
