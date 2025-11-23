@@ -89,7 +89,7 @@ def test_communicate_websocket_relays_flagged_and_raw_audio_between_peers() -> N
                 assert audio_event_a["role"] == "scammer"
                 assert audio_event_a["flagged"] is True
                 assert audio_event_a["transcript"] == "scammer:24"
-                assert b64decode(audio_event_a["audio_b64"]) == audio_chunk_b
+                assert b64decode(audio_event_a["audio_b64"]) == bytes(len(audio_chunk_b))
 
                 ws_b.send_text(json.dumps({"event": "end"}))
 
