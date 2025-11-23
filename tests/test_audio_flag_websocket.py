@@ -45,8 +45,13 @@ def test_audio_flag_endpoint_streams_audio_bytes() -> None:
         TranscriptSegment(text="La clave secreta es 1234", is_final=True),
     ]
     speech_to_text = FakeSpeechToTextService(segments)
-    filter_service = FilterService([r"\bclave\b"])
-    audio_service = AudioFlagService(speech_to_text, filter_service)
+    filter_service_user = FilterService([r"\bclave\b"])
+    filter_service_scammer = FilterService([r"\bclave\b"])
+    audio_service = AudioFlagService(
+        speech_to_text,
+        filter_service_user=filter_service_user,
+        filter_service_scammer=filter_service_scammer,
+    )
     notifier = StubNotifier()
 
     app = FastAPI()

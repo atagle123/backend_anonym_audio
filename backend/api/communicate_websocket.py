@@ -1,42 +1,53 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
 import uuid
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from backend.services import AudioFlagService, FlaggedTranscript
+
 LOGGER = logging.getLogger(__name__)
+
+
+@dataclass
+class Client:
+    client_id: str
+    role: str
+    websocket: WebSocket
 
 
 class Room:
     """Manage the set of active websocket connections for a room."""
 
     def __init__(self) -> None:
-        self._clients: Dict[int, Tuple[str, WebSocket]] = {}
+        self._clients: Dict[int, Client] = {}
         self._lock = asyncio.Lock()
 
-    async def join(self, ws: WebSocket) -> str:
-        client_id = uuid.uuid4().hex
+    async def join(self, ws: WebSocket, role: str) -> Client:
+        client = Client(client_id=uuid.uuid4().hex, role=role, websocket=ws)
         async with self._lock:
-            self._clients[id(ws)] = (client_id, ws)
-        return client_id
+            self._clients[id(ws)] = client
+        return client
 
-    async def leave(self, ws: WebSocket) -> Optional[str]:
+    async def leave(self, ws: WebSocket) -> Optional[Client]:
         async with self._lock:
-            entry = self._clients.pop(id(ws), None)
-        return entry[0] if entry else None
+            return self._clients.pop(id(ws), None)
 
-    async def peers(self, ws: WebSocket) -> List[Tuple[str, WebSocket]]:
+    async def peers(self, ws: WebSocket) -> List[Client]:
         async with self._lock:
             return [
-                (client_id, client_ws)
-                for key, (client_id, client_ws) in self._clients.items()
+                client
+                for key, client in self._clients.items()
                 if key != id(ws)
             ]
 
-    async def clients(self) -> List[Tuple[str, WebSocket]]:
+    async def clients(self) -> List[Client]:
         async with self._lock:
             return list(self._clients.values())
 
@@ -66,30 +77,19 @@ async def _cleanup_room(room_id: str, room: Room) -> None:
             _rooms.pop(room_id, None)
 
 
-async def _broadcast_bytes(
-    room: Room, sender: WebSocket, payload: bytes
-) -> None:
-    peers = await room.peers(sender)
-    if not peers:
-        return
-    tasks = [peer_ws.send_bytes(payload) for _, peer_ws in peers]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for (peer_id, _), result in zip(peers, results):
-        if isinstance(result, Exception):
-            LOGGER.warning("Broadcast to peer %s failed: %s", peer_id, result)
-
-
 async def _broadcast_text(
     room: Room, sender: WebSocket, payload: str
 ) -> None:
     peers = await room.peers(sender)
     if not peers:
         return
-    tasks = [peer_ws.send_text(payload) for _, peer_ws in peers]
+    tasks = [peer.websocket.send_text(payload) for peer in peers]
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for (peer_id, _), result in zip(peers, results):
+    for peer, result in zip(peers, results):
         if isinstance(result, Exception):
-            LOGGER.warning("Broadcast to peer %s failed: %s", peer_id, result)
+            LOGGER.warning(
+                "Broadcast to peer %s failed: %s", peer.client_id, result
+            )
 
 
 async def _notify_peers(
@@ -99,57 +99,149 @@ async def _notify_peers(
     if not clients:
         return
     tasks = []
-    recipients: List[Tuple[str, WebSocket]] = []
-    for peer_id, ws in clients:
-        if exclude is not None and ws is exclude:
+    recipients: List[Client] = []
+    for client in clients:
+        if exclude is not None and client.websocket is exclude:
             continue
-        recipients.append((peer_id, ws))
-        tasks.append(ws.send_json(payload))
+        recipients.append(client)
+        tasks.append(client.websocket.send_json(payload))
 
     if not tasks:
         return
 
     results = await asyncio.gather(*tasks, return_exceptions=True)
-    for (peer_id, _), result in zip(recipients, results):
+    for client, result in zip(recipients, results):
         if isinstance(result, Exception):
-            LOGGER.warning("Notification to peer %s failed: %s", peer_id, result)
+            LOGGER.warning(
+                "Notification to peer %s failed: %s", client.client_id, result
+            )
 
 
-def create_communicate_router() -> APIRouter:
+async def _broadcast_flagged_audio(
+    room: Room,
+    sender: Client,
+    audio_payload: bytes,
+    flagged: FlaggedTranscript,
+) -> None:
+    if not audio_payload:
+        return
+
+    peers = await room.peers(sender.websocket)
+    if not peers:
+        return
+
+    audio_b64 = base64.b64encode(audio_payload).decode("ascii")
+    message = {
+        "event": "audio",
+        "client_id": sender.client_id,
+        "role": sender.role,
+        "flagged": flagged.flagged,
+        "is_final": flagged.is_final,
+        "transcript": flagged.text,
+        "audio_b64": audio_b64,
+    }
+
+    tasks = [peer.websocket.send_json(message) for peer in peers]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for peer, result in zip(peers, results):
+        if isinstance(result, Exception):
+            LOGGER.warning(
+                "Flagged audio broadcast to %s failed: %s",
+                peer.client_id,
+                result,
+            )
+
+
+def create_communicate_router(audio_service: AudioFlagService) -> APIRouter:
     """
-    Register a websocket endpoint that relays binary audio frames between peers.
+    Register a websocket endpoint that relays binary audio frames between peers
+    after passing them through the AudioFlagService.
 
     Path: `/ws/communicate/{room_id}`
     Notes:
         - Peers join a logical room identified by `room_id`.
-        - Binary frames are forwarded losslessly to every other peer.
-        - Text frames are forwarded as-is so clients can reuse out-of-band control
-          messages (for example, `{"event": "end"}`).
+        - Clients must declare their role via `?role=user|scammer`.
+        - Incoming audio is transcribed using the provided AudioFlagService.
+          Once the transcript is flagged, the audio chunk plus metadata is sent
+          to the other peers.
+        - Text frames are forwarded as-is for out-of-band coordination.
         - Lifecycle events are emitted to all peers (`peer_joined`, `peer_left`).
     """
 
     router = APIRouter()
 
     @router.websocket("/ws/communicate/{room_id}")
-    async def communicate(room_id: str, ws: WebSocket) -> None:
+    async def communicate(
+        room_id: str,
+        ws: WebSocket,
+        role: str = "user",
+    ) -> None:
+        role_key = (role or "").lower()
+        if role_key not in {"user", "scammer"}:
+            await ws.close(code=4000)
+            return
+
         await ws.accept()
         room = await _get_room(room_id)
-        client_id = await room.join(ws)
+        client = await room.join(ws, role=role_key)
 
-        await ws.send_json({"event": "ready", "client_id": client_id})
+        await ws.send_json(
+            {"event": "ready", "client_id": client.client_id, "role": client.role}
+        )
 
         existing_peers = await room.peers(ws)
         if existing_peers:
             await ws.send_json(
                 {
                     "event": "peers",
-                    "client_ids": [peer_id for peer_id, _ in existing_peers],
+                    "peers": [
+                        {"client_id": peer.client_id, "role": peer.role}
+                        for peer in existing_peers
+                    ],
                 }
             )
 
         await _notify_peers(
-            room, {"event": "peer_joined", "client_id": client_id}, exclude=ws
+            room,
+            {
+                "event": "peer_joined",
+                "client_id": client.client_id,
+                "role": client.role,
+            },
+            exclude=ws,
         )
+
+        audio_queue: asyncio.Queue[Optional[bytes]] = asyncio.Queue()
+        pending_audio = bytearray()
+        stream_closed = False
+        flagged_emitted = False
+
+        async def audio_chunk_stream():
+            while True:
+                chunk = await audio_queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+
+        async def flag_worker():
+            nonlocal pending_audio, flagged_emitted
+            try:
+                async for flagged in audio_service.process_stream(
+                    audio_chunk_stream(), role=client.role
+                ):
+                    payload = bytes(pending_audio)
+                    pending_audio = bytearray()
+                    if payload:
+                        await _broadcast_flagged_audio(room, client, payload, flagged)
+                        flagged_emitted = True
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception(
+                    "Failed to process audio stream for client %s", client.client_id
+                )
+
+        flag_task = asyncio.create_task(flag_worker())
 
         try:
             while True:
@@ -158,19 +250,58 @@ def create_communicate_router() -> APIRouter:
                 if message_type == "websocket.disconnect":
                     break
 
-                if (binary := message.get("bytes")) is not None:
-                    await _broadcast_bytes(room, ws, binary)
+                binary = message.get("bytes")
+                if binary is not None:
+                    pending_audio.extend(binary)
+                    await audio_queue.put(binary)
                     continue
 
-                if (text := message.get("text")) is not None:
-                    await _broadcast_text(room, ws, text)
+                text = message.get("text")
+                if text is not None:
+                    handled = False
+                    if text:
+                        try:
+                            payload = json.loads(text)
+                        except json.JSONDecodeError:
+                            payload = None
+                        if isinstance(payload, dict) and payload.get("event") == "end":
+                            stream_closed = True
+                            await audio_queue.put(None)
+                            handled = True
+                            break
+                    if not handled:
+                        await _broadcast_text(room, ws, text)
+                    continue
         except WebSocketDisconnect:
             pass
         finally:
-            await room.leave(ws)
+            if not stream_closed:
+                await audio_queue.put(None)
+
+            try:
+                await flag_task
+            except asyncio.CancelledError:
+                pass
+
+            if pending_audio and not flagged_emitted:
+                await _broadcast_flagged_audio(
+                    room,
+                    client,
+                    bytes(pending_audio),
+                    FlaggedTranscript(text="", flagged=False, is_final=True),
+                )
+
+            departed = await room.leave(ws)
+            departed_client = departed or client
             await _notify_peers(
-                room, {"event": "peer_left", "client_id": client_id}
+                room,
+                {
+                    "event": "peer_left",
+                    "client_id": departed_client.client_id,
+                    "role": departed_client.role,
+                },
             )
             await _cleanup_room(room_id, room)
 
     return router
+

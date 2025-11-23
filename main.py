@@ -27,8 +27,13 @@ def _build_audio_flag_service() -> AudioFlagService:
         )
 
     speech_to_text = ElevenLabsSpeechToTextService(api_key=api_key)
-    filter_service = ChileScamFilter()
-    return AudioFlagService(speech_to_text, filter_service)
+    filter_service_user = ChileScamFilter()
+    filter_service_scammer = ChileScamFilter()
+    return AudioFlagService(
+        speech_to_text,
+        filter_service_user=filter_service_user,
+        filter_service_scammer=filter_service_scammer,
+    )
 
 
 def _build_notifier() -> NotificationService:
@@ -76,7 +81,7 @@ def create_app() -> FastAPI:
     audio_flag_service = _build_audio_flag_service()
     notifier = _build_notifier()
     app.include_router(create_audio_flag_router(audio_flag_service, notifier))
-    app.include_router(create_communicate_router())
+    app.include_router(create_communicate_router(audio_flag_service))
     return app
 
 

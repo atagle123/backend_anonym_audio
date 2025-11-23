@@ -36,6 +36,7 @@ def create_audio_flag_router(
 
     @router.websocket("/ws/audio-flag")
     async def audio_flag_endpoint(ws: WebSocket) -> None:
+        role = ws.query_params.get("role", "scammer")
         await ws.accept()
         await ws.send_json({"event": "ready"})
 
@@ -90,7 +91,9 @@ def create_audio_flag_router(
         async def sender() -> None:
             nonlocal any_flagged, first_flagged_segment
             try:
-                async for flagged in service.process_stream(audio_chunk_stream()):
+                async for flagged in service.process_stream(
+                    audio_chunk_stream(), role=role
+                ):
                     any_flagged = any_flagged or flagged.flagged
                     if flagged.flagged:
                         if first_flagged_segment is None:
