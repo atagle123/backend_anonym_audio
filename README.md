@@ -54,3 +54,35 @@ Set the following variables before launching the API:
 
 - Low-latency streaming depends on ElevenLabs' `speech-to-text/stream` endpoint. Double-check their latest docs to confirm the protocol details.
 - Update the wordlist in `backend/FilterService/chileFIlter.py` to adapt the scam filter for your use case.
+
+# Anti-Scam Audio App – Features
+
+## 🎤 Voice Privacy
+
+- Mask & change your voice
+- Automatic voice modulation
+
+## ⚠️ Smart Alerts
+
+- Detect sensitive words & phrases
+- Real-time scam warnings
+
+## 🔔 Notifications
+
+- Push/email alerts
+- Audit log of flagged content
+
+## 🗣️ Real-Time Communication
+
+- Live audio streaming with filtering
+- Low-latency voice chat
+
+## 🛡️ Intelligent Filtering
+
+- Regex & keyword detection
+- Optional AI scoring for scam probability
+
+## 👤 User-Friendly
+
+- Visual cues for alerts
+- Multilingual support (ES/EN)
